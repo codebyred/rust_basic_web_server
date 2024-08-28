@@ -1,20 +1,11 @@
 use std::{
-    error, fmt::{self, Display, Formatter}, thread::{self, JoinHandle}
+    error, fmt::{self, Display, Formatter}, sync::{mpsc, Arc, Mutex}, thread
 };
 
-#[derive(Debug)]
-pub struct ThreadPool{
-    threads: Vec<Worker>
-}
+type Job = Box<dyn FnOnce() + 'static + Send>;
 
 #[derive(Debug)]
 pub struct PoolCreationErr;
-
-#[derive(Debug)]
-pub struct Worker {
-    id: u32,
-    handler: JoinHandle<()>
-}
 
 impl Display for PoolCreationErr {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -23,6 +14,37 @@ impl Display for PoolCreationErr {
 }
 
 impl error::Error for PoolCreationErr {}
+
+#[derive(Debug)]
+struct Worker {
+    id: u32,
+    handler: thread::JoinHandle<()>
+}
+
+impl Worker {
+    fn new(id: u32, receiver: Arc<Mutex<mpsc::Receiver<Job>>>) -> Worker {
+        Worker {
+            id,
+            handler: thread::spawn(move || loop {
+                
+                let job = receiver
+                    .lock()
+                    .unwrap()
+                    .recv()
+                    .unwrap();
+                
+                job();
+            
+            })
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ThreadPool{
+    threads: Vec<Worker>,
+    sender: mpsc::Sender<Job>
+}
 
 impl ThreadPool {
     /// Create a new ThreadPool
@@ -34,17 +56,21 @@ impl ThreadPool {
     /// The new function will panic if size is 0
     pub fn build(size: usize) -> Result<ThreadPool, PoolCreationErr> {
         
-        if size > 0 {
+        if size == 0 {
             return Err(PoolCreationErr);
         };
         
         let mut threads = Vec::with_capacity(size);
         
+        let (tx, rx) = mpsc::channel();
+        
+        let receiver = Arc::new(Mutex::new(rx));
+        
         for i in 0..size {
-            threads.push(Worker::new(i as u32));
+            threads.push(Worker::new(i as u32, Arc::clone(&receiver)));
         }
         
-        Ok(ThreadPool { threads })
+        Ok(ThreadPool { threads , sender:tx})
         
     }
     
@@ -52,15 +78,9 @@ impl ThreadPool {
     where 
         F: FnOnce() + Send + 'static
     {
-        
+        let job = Box::new(f);
+        self.sender.send(job).unwrap();
     }
 }
 
-impl Worker {
-    fn new(id: u32) -> Worker {
-        Worker {
-            id,
-            handler: thread::spawn(|| {})
-        }
-    }
-}
+
